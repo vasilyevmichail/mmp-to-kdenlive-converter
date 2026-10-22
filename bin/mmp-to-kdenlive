@@ -1,0 +1,24 @@
+#!/usr/bin/env php
+<?php
+declare(strict_types=1);
+
+require __DIR__ . '/../vendor/autoload.php';
+
+use Vasilyevmichail\MmpToKdenlive\KdenliveEditor;
+
+$argv = $_SERVER['argv'];
+if (count($argv) < 4) {
+    fwrite(STDERR, "Использование: mmp-to-kdenlive clips.json base.kdenlive out.kdenlive\n");
+    exit(1);
+}
+[, $jsonPath, $basePath, $outPath] = $argv;
+
+try {
+    $editor = (new KdenliveEditor())
+        ->setClipsRoot('/home/patti/Videos/')
+        ->setProjectRoot('/home/patti/Videos');
+    exit($editor->apply($jsonPath, $basePath, $outPath));
+} catch (\Throwable $e) {
+    fwrite(STDERR, "[error] " . $e->getMessage() . "\n");
+    exit(2);
+}
