@@ -422,15 +422,30 @@ final class KdenliveEditor
                 $this->chainIdByPath[$resource], ++$maxId);
             $aPl->appendChild($aEntry);
 
-            // переходы
+            // --- переходы: fade-in в начале, fade-out в конце ---
+            // Длительность по умолчанию, если в JSON нет transition.duration.
+            // Подберите под ваш вкус: 1.0 сек = 25 кадров.
+            $defaultFadeSec = 7.0;
+            $defaultFadeFrames = Time::secondsToFrames($defaultFadeSec);
+
             $tr = $clip['transition'] ?? [];
             $tType = $tr['type'] ?? 'none';
-            $tFrames = isset($tr['duration']) ? Time::toFrames($tr['duration']) : 0;
+            $tFrames = isset($tr['duration'])
+                ? Time::toFrames($tr['duration'])
+                : $defaultFadeFrames;
 
-            if ($tType === 'fade_from_black' && $tFrames > 0) {
+            // fade-in: только если это не первый клип ИЛИ явно задан fade_from_black
+            $isFirst = ($i === 0);
+            $wantFadeIn = !$isFirst || $tType === 'fade_from_black';
+            if ($wantFadeIn && $tFrames > 0) {
                 $this->addFadeFilter($doc, $vEntry, "filter_auto_{$i}_in",
                     'fade_from_black', $cIn, $cIn + $tFrames);
-            } elseif ($tType === 'fade_to_black' && $tFrames > 0) {
+            }
+
+            // fade-out: только если это не последний клип ИЛИ явно задан fade_to_black
+            $isLast = ($i === count($clips) - 1);
+            $wantFadeOut = !$isLast || $tType === 'fade_to_black';
+            if ($wantFadeOut && $tFrames > 0) {
                 $this->addFadeFilter($doc, $vEntry, "filter_auto_{$i}_out",
                     'fade_to_black', $cOut - $tFrames, $cOut);
             }
