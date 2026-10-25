@@ -51,19 +51,20 @@ final class KdenliveEditor
 
         $this->addChains($doc, $root, $clips);
 
-        $videoTractors = $this->findFreeVideoTractors($doc, count($clips));
-        $audioTractors = $this->findFreeAudioTractors($doc, count($clips));
+        $needTracks = min(2, count($clips));
+        $videoTractors = $this->findFreeVideoTractors($doc, $needTracks);
+        $audioTractors = $this->findFreeAudioTractors($doc, $needTracks);
 
-        if (count($videoTractors) < count($clips)) {
+        if (count($videoTractors) < $needTracks) {
             throw new \RuntimeException(
-                'Недостаточно свободных видеодорожек: нужно ' . count($clips)
-                . ', найдено ' . count($videoTractors)
+                "Недостаточно свободных видеодорожек: нужно $needTracks, найдено "
+                . count($videoTractors)
             );
         }
-        if (count($audioTractors) < count($clips)) {
+        if (count($audioTractors) < $needTracks) {
             throw new \RuntimeException(
-                'Недостаточно свободных аудиодорожек: нужно ' . count($clips)
-                . ', найдено ' . count($audioTractors)
+                "Недостаточно свободных аудиодорожек: нужно $needTracks, найдено "
+                . count($audioTractors)
             );
         }
 
@@ -343,16 +344,15 @@ final class KdenliveEditor
         array $audioTractors,
         DOMElement $seqTractor
     ): int {
-        $videoEnds = [];
-        $audioEnds = [];
-        foreach ($videoTractors as $id) $videoEnds[$id] = 0;
-        foreach ($audioTractors as $id) $audioEnds[$id] = 0;
+        // Только две дорожки каждого типа (или меньше, если клипов меньше)
+        $vPair = array_slice($videoTractors, 0, min(2, count($videoTractors)));
+        $aPair = array_slice($audioTractors, 0, min(2, count($audioTractors)));
+
+        $videoEnds = array_fill_keys($vPair, 0);
+        $audioEnds = array_fill_keys($aPair, 0);
 
         $maxEndFrames = 0;
         $groups = [];
-
-        $nV = count($videoTractors);
-        $nA = count($audioTractors);
         $maxId = MltXml::getMaxClipId($doc);
 
         foreach ($clips as $i => $clip) {
@@ -361,32 +361,68 @@ final class KdenliveEditor
 
             $cIn  = Time::toFrames($clip['trim_in_hms']);
             $cOut = Time::toFrames($clip['trim_out_hms']);
-            $tPos = Time::toFrames($clip['start_time_hms']);
-            $dur  = $cOut - $cIn;
+            $dur  = max(0, $cOut - $cIn);
 
-            $videoTr = $videoTractors[$i % $nV];
-            $audioTr = $audioTractors[$i % $nA];
+            // start_time строго из JSON
+            $start = Time::toFrames($clip['start_time_hms']);
+            $end   = $start + $dur;
 
-            $realStartV = max($tPos, $videoEnds[$videoTr]);
-            $realStartA = max($tPos, $audioEnds[$audioTr]);
-            $end = max($realStartV, $realStartA) + $dur;
+            // чередование дорожек
+            $videoTr = $vPair[$i % count($vPair)];
+            $audioTr = $aPair[$i % count($aPair)];
+
+            // Наложение внутри дорожки — это ошибка входных данных, а не повод сдвигать
+            if ($start < $videoEnds[$videoTr]) {
+                throw new \RuntimeException(sprintf(
+                    'Клип #%d (%s) начинается в %s, но видеодорожка %s занята до %s. '
+                    . 'Данные не помещаются на %d видеодорожек.',
+                    $i + 1, $clip['file_name'] ?? $fp,
+                    Time::framesToTimecode($start), $videoTr,
+                    Time::framesToTimecode($videoEnds[$videoTr]),
+                    count($vPair)
+                ));
+            }
+            if ($start < $audioEnds[$audioTr]) {
+                throw new \RuntimeException(sprintf(
+                    'Клип #%d (%s) начинается в %s, но аудиодорожка %s занята до %s. '
+                    . 'Данные не помещаются на %d аудиодорожек.',
+                    $i + 1, $clip['file_name'] ?? $fp,
+                    Time::framesToTimecode($start), $audioTr,
+                    Time::framesToTimecode($audioEnds[$audioTr]),
+                    count($aPair)
+                ));
+            }
+
             $maxEndFrames = max($maxEndFrames, $end);
 
-            // видео
+            // --- видео ---
             $vTractor = MltXml::findTractorById($doc, $videoTr);
-            $vTracks = $this->tractorTracks($vTractor);
-            $vPl = MltXml::findPlaylistById($doc, $vTracks[0]->getAttribute('producer'));
+            $vTracks  = $this->tractorTracks($vTractor);
+            $vPl      = MltXml::findPlaylistById($doc, $vTracks[0]->getAttribute('producer'));
 
             MltXml::removeProp($vTractor, 'kdenlive:audio_track');
             MltXml::removeProp($vPl, 'kdenlive:audio_track');
 
-            $gapV = $realStartV - $videoEnds[$videoTr];
+            $gapV = $start - $videoEnds[$videoTr];
             if ($gapV > 0) $vPl->appendChild($this->makeBlank($doc, $gapV));
 
             $vEntry = $this->makeEntry($doc, $cIn, $cOut,
                 $this->chainIdByPath[$resource], ++$maxId);
             $vPl->appendChild($vEntry);
 
+            // --- аудио ---
+            $aTractor = MltXml::findTractorById($doc, $audioTr);
+            $aTracks  = $this->tractorTracks($aTractor);
+            $aPl      = MltXml::findPlaylistById($doc, $aTracks[0]->getAttribute('producer'));
+
+            $gapA = $start - $audioEnds[$audioTr];
+            if ($gapA > 0) $aPl->appendChild($this->makeBlank($doc, $gapA));
+
+            $aEntry = $this->makeEntry($doc, $cIn, $cOut,
+                $this->chainIdByPath[$resource], ++$maxId);
+            $aPl->appendChild($aEntry);
+
+            // переходы
             $tr = $clip['transition'] ?? [];
             $tType = $tr['type'] ?? 'none';
             $tFrames = isset($tr['duration']) ? Time::toFrames($tr['duration']) : 0;
@@ -399,28 +435,16 @@ final class KdenliveEditor
                     'fade_to_black', $cOut - $tFrames, $cOut);
             }
 
-            // аудио
-            $aTractor = MltXml::findTractorById($doc, $audioTr);
-            $aTracks = $this->tractorTracks($aTractor);
-            $aPl = MltXml::findPlaylistById($doc, $aTracks[0]->getAttribute('producer'));
-
-            $gapA = $realStartA - $audioEnds[$audioTr];
-            if ($gapA > 0) $aPl->appendChild($this->makeBlank($doc, $gapA));
-
-            $aEntry = $this->makeEntry($doc, $cIn, $cOut,
-                $this->chainIdByPath[$resource], ++$maxId);
-            $aPl->appendChild($aEntry);
-
+            // занятость
             $videoEnds[$videoTr] = $end;
             $audioEnds[$audioTr] = $end;
 
-            // группа AVSplit
+            // группы: РЕАЛЬНАЯ позиция ($start), а не $tPos
             [$vIdx, $aIdx] = $this->findTrackIndexes($seqTractor, $videoTr, $audioTr);
-
             $groups[] = [
                 'children' => [
-                    ['data' => "$vIdx:$tPos:-1", 'leaf' => 'clip', 'type' => 'Leaf'],
-                    ['data' => "$aIdx:$tPos:-1", 'leaf' => 'clip', 'type' => 'Leaf'],
+                    ['data' => "$vIdx:$start:-1", 'leaf' => 'clip', 'type' => 'Leaf'],
+                    ['data' => "$aIdx:$start:-1", 'leaf' => 'clip', 'type' => 'Leaf'],
                 ],
                 'type' => 'AVSplit',
             ];
